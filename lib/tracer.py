@@ -5,6 +5,7 @@ import tensorflow as tf
 import tf_helper as tfh
 import numpy as np
 
+
 class Tracer:
     def __init__(self, options=None):
         self.options = options if options is not None else TracerOptions()
@@ -24,43 +25,53 @@ class Tracer:
         lookAt = self.options.lookAt
         camera = camera_position - np.array(lookAt)
         camera_direction = tfh.normalize_vector(camera)
-        focal_length = 1
+        focal_length = self.options.focal_length
         eye = camera + focal_length * camera_direction
 
         # Coerce into correct shape
         image_plane_center = tfh.vector_fill(resolution, camera_position)
 
         # Convert u,v parameters to x,y,z coordinates for the image plane
-        v_unit = [0.0, 0.0, -1.0]
+        v_unit = self.options.v_unit
         u_unit = tf.cross(camera_direction, v_unit)
         image_plane = image_plane_center + image_plane_coords[0] * tfh.vector_fill(resolution, u_unit) + \
-                      image_plane_coords[
-                          1] * tfh.vector_fill(resolution, v_unit)
+                      image_plane_coords[1] * tfh.vector_fill(resolution, v_unit)
 
         # Populate the image plane with initial unit ray vectors
         initial_vectors = image_plane - tfh.vector_fill(resolution, eye)
         ray_vectors = tfh.normalize_vector(initial_vectors)
+        # ray_vectors = tfh.vector_fill(resolution, -camera_direction)
+        evaluated_function_nminus = tf.Variable(tf.zeros(resolution))
+        damping = tf.Variable(tf.ones(resolution))
+        i = tf.Variable(1.0)
 
         t = tf.Variable(tf.zeros_initializer(dtype=tf.float32)(resolution), name="ScalingFactor")
         space = (ray_vectors * t) + image_plane
 
         # Name TF ops for better graph visualization
-        x = tf.squeeze(tf.slice(space, [0, 0, 0], [1, -1, -1]), squeeze_dims=[0], name="X-Coordinates")
-        y = tf.squeeze(tf.slice(space, [1, 0, 0], [1, -1, -1]), squeeze_dims=[0], name="Y-Coordinates")
-        z = tf.squeeze(tf.slice(space, [2, 0, 0], [1, -1, -1]), squeeze_dims=[0], name="Z-Coordinates")
+        x = tf.squeeze(tf.slice(space, [0, 0, 0], [1, -1, -1]), axis=[0], name="X-Coordinates")
+        y = tf.squeeze(tf.slice(space, [1, 0, 0], [1, -1, -1]), axis=[0], name="Y-Coordinates")
+        z = tf.squeeze(tf.slice(space, [2, 0, 0], [1, -1, -1]), axis=[0], name="Z-Coordinates")
 
         evaluated_function = scenery(x, y, z)
-
         # Iteration operation
-        epsilon = 0.0001
-        delta = 10000.0
+        epsilon = self.options.epsilon
+        delta = 1000.0
         distance = tf.abs(evaluated_function)
-        distance_no_nan = tf.where(tf.is_nan(distance), tf.ones_like(distance) * 10000.0, distance)
+        distance_no_nan = tf.where(tf.is_nan(distance), tf.ones_like(distance) * delta, distance)
         converged_bitmask = tf.less_equal(distance, epsilon)
-        distance_step = t + (tf.sign(evaluated_function) * tf.maximum(distance, epsilon) * tf.to_float(tf.logical_not(converged_bitmask)))
+        converged_diverged_bitmask = tf.logical_or(converged_bitmask, tf.greater(distance, delta))
+        distance_step = t + (tf.sign(evaluated_function) * tf.maximum(distance * (damping), 1.0 * epsilon) * tf.to_float(
+            tf.logical_not(converged_diverged_bitmask)))
 
         converged_count = tf.count_nonzero(converged_bitmask)
         diverged_count = tf.count_nonzero(tf.greater_equal(distance_no_nan, delta))
+
+        next_damping = damping * tf.where(tf.less(evaluated_function_nminus * evaluated_function, tf.zeros_like(evaluated_function)), tf.ones_like(evaluated_function) * self.options.damping, tf.ones_like(evaluated_function) * self.options.speed_up)
+
+        damping_step = damping.assign(next_damping)
+        evaluation_step = tf.group(evaluated_function_nminus.assign(evaluated_function),
+                                   i.assign(i + 1.0))
         ray_step = t.assign(distance_step)
 
         light = {"position": np.array([float(0.0), float(1.0), float(1.0)], dtype=np.float32),
@@ -108,16 +119,20 @@ class Tracer:
         session = tf.Session()
         session.run(tf.global_variables_initializer())
         step = 0
-        max_steps = 100
+        max_steps = self.options.max_steps
         total = resolution[0] * resolution[1]
         sys.stdout.write("\n")
         while step < max_steps:
             converged = session.run(converged_count)
             diverged = session.run(diverged_count)
+            damped = session.run(damping)
             left = total - converged - diverged
-            sys.stdout.write("\r\033[2KStep: %s, Converged: %s, Diverged: %s, Left: %s" % (step, converged, diverged, left))
+            sys.stdout.write(
+                "\r\033[2KStep: %s/%s, Converged: %s, Diverged: %s, Left: %s" % (step, max_steps, converged, diverged, left))
             if left == 0:
                 break
+            session.run(damping_step)
+            session.run(evaluation_step)
             session.run(ray_step)
             step += 1
             # sys.stdout.write("")
@@ -133,10 +148,16 @@ class Tracer:
 
 class TracerOptions:
     def __init__(self):
-        self.resolution = (400, 400)
-        self.camera_position = [-2.0, 0.0, 1.0]
+        self.resolution = (300, 300)
+        self.camera_position = [0.0, 0.0, 1.5]
+        self.v_unit = [1.0, 0.0, 0.0]
         self.lookAt = (0.0, 0.0, 0.0)
         self.verbose = True
+        self.speed_up = 1.25
+        self.damping = 0.8
+        self.epsilon = 0.00001
+        self.max_steps = 100
+        self.focal_length = 1
 
 
 class TracerSession:

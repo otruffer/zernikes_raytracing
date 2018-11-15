@@ -38,10 +38,11 @@ def zernike_surface(zsi, r=4.0):
     zs = tf.convert_to_tensor(zsi, dtype=tf.float32)
 
     def z(x, y, z):
-        cfs = tf.convert_to_tensor(build_coefs(x, y, (400, 400)))
+        cfs = tf.convert_to_tensor(build_coefs(x, y, x.shape))
         t = tf.einsum("i,ijm->jm", zs, cfs)
         # t = cfs * zs
         return z - t
 
     return operation.i(z, cy)
+    # return z
 
